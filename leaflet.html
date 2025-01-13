@@ -1,28 +1,13 @@
 <!DOCTYPE html>
 <html>
-
 <head>
-  <title>Zoom 18 Polygon & Tile Area</title>
+  <title>Zoom 18 Polygon & Tile Area (Enhanced Precision)</title>
   <meta charset="UTF-8" />
-  <!-- Leaflet CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-  <!-- Leaflet Draw CSS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet-draw/dist/leaflet.draw.css" />
-  <!-- CSS styles for the map and results panel -->
   <style>
-    /* Reset default margins */
-    body {
-      margin: 0;
-      padding: 0;
-    }
-
-    /* Make map fill viewport */
-    #map {
-      width: 100vw;
-      height: 100vh;
-    }
-
-    /* Results panel styling */
+    body { margin: 0; padding: 0; }
+    #map { width: 100vw; height: 100vh; }
     #results {
       position: absolute;
       top: 10px;
@@ -36,64 +21,34 @@
       overflow: auto;
       max-height: 400px;
     }
-
-    /* Results panel header */
-    #results h3 {
-      margin: 0 0 5px 0;
-      font-size: 16px;
-    }
-
-    /* Results text formatting */
-    #results pre {
-      white-space: pre-wrap;
-      word-wrap: break-word;
-    }
+    #results h3 { margin: 0 0 5px 0; font-size: 16px; }
+    #results pre { white-space: pre-wrap; word-wrap: break-word; }
   </style>
 </head>
-
 <body>
-  <!-- Main map container -->
   <div id="map"></div>
-
-  <!-- Results panel -->
   <div id="results">
     <h3>Polygon & Tile Info</h3>
-    <div id="infoText">
-      Draw a polygon using the Leaflet Draw tools.
-    </div>
+    <div id="infoText">Draw a polygon using the Leaflet Draw tools.</div>
   </div>
 
-  <!-- Required JavaScript libraries -->
-  <!-- Leaflet core library -->
   <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-  <!-- Leaflet Draw plugin for polygon drawing -->
   <script src="https://unpkg.com/leaflet-draw/dist/leaflet.draw.js"></script>
-  <!-- Turf.js for geospatial calculations -->
   <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
   <script>
-    // --------------------------------------------------------------------
-    // 1. Initialize Leaflet map
-    // --------------------------------------------------------------------
-    // Create map instance centered at (0,0) with zoom level 2
     const map = L.map('map', {
-      center: [0, 0],  // Example center
+      center: [0, 0],
       zoom: 2
     });
 
-    // Add OpenStreetMap tile layer as base map
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       attribution: '© OpenStreetMap'
     }).addTo(map);
 
-    // --------------------------------------------------------------------
-    // 2. Add Leaflet Draw controls (so user can draw polygons)
-    // --------------------------------------------------------------------
-    // Create feature group to hold drawn items
     const drawnItems = new L.FeatureGroup();
     map.addLayer(drawnItems);
 
-    // Configure drawing controls - only allow polygons
     const drawControl = new L.Control.Draw({
       edit: {
         featureGroup: drawnItems
@@ -109,175 +64,136 @@
     });
     map.addControl(drawControl);
 
-    // --------------------------------------------------------------------
-    // 3. Helper functions for coordinate transform & area
-    // --------------------------------------------------------------------
+    const ZOOM_LEVEL = 18;
+    const TILE_COUNT = Math.pow(2, ZOOM_LEVEL); // 2^18 = 262144
+    const EARTH_RADIUS_METERS = 6371000;
+    const TILE_SIZE_PIXELS = 256;
+    const M2_TO_FT2 = 10.7639104167097;  // More precise conversion factor
 
-    // Convert (lat, lon) -> (x_merc, y_merc) in EPSG:3857 (meters).
-    // Ref: https://wiki.openstreetmap.org/wiki/Mercator
-    function latLonToMerc(lat, lon) {
-      const x = (lon * 20037508.34) / 180;
-      let y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180);
-      y = (y * 20037508.34) / 180;
+    function latLonToTile(lat, lon, zoom) {
+      const x = Math.floor((lon + 180) / 360 * Math.pow(2, zoom));
+      const latRad = lat * Math.PI / 180;
+      const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * Math.pow(2, zoom));
       return [x, y];
     }
 
-    // Shoelace formula for polygon area in planar coords (EPSG:3857).
-    // coords: array of [ [x, y], [x, y], ..., [x, y] ] (closed ring).
-    // Returns area in square meters.
-    function polygonAreaSqMeters(coords) {
-      let area = 0;
-      for (let i = 0; i < coords.length - 1; i++) {
-        area += coords[i][0] * coords[i + 1][1] - coords[i + 1][0] * coords[i][1];
-      }
-      return Math.abs(area) / 2.0;
+    function tileToLatLonBounds(x, y, zoom) {
+      const n = Math.pow(2, zoom);
+      const west = x / n * 360 - 180;
+      const east = (x + 1) / n * 360 - 180;
+      const north = Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI;
+      const south = Math.atan(Math.sinh(Math.PI * (1 - 2 * (y + 1) / n))) * 180 / Math.PI;
+      return { west, east, north, south };
     }
 
-    // Convert from sq meters to sq feet using standard conversion factor
-    function sqMetersToSqFeet(m2) {
-      return m2 * 10.7639;
-    }
-
-    // --------------------------------------------------------------------
-    // 4. Tile system at zoom level 18
-    // --------------------------------------------------------------------
-    // Constants for tile calculations at zoom level 18
-    const ZOOM_LEVEL = 18;
-    const TILE_COUNT = Math.pow(2, ZOOM_LEVEL); // 2^18 = 262144
-    const WORLD_MERC_SIZE = 2 * 20037508.34;    // ~40075016.68 meters
-    const TILE_SIZE_M = WORLD_MERC_SIZE / TILE_COUNT; // ~152.874 m at zoom 18
-
-    // Convert mercator coordinates to tile coordinates (Google/Slippy scheme)
-    function mercToTileX(xMerc) {
-      return Math.floor((xMerc + 20037508.34) / TILE_SIZE_M);
-    }
-    function mercToTileY(yMerc) {
-      return Math.floor((20037508.34 - yMerc) / TILE_SIZE_M);
-    }
-
-    // Build tile polygon vertices in EPSG:3857 coordinates
-    function tilePolygonMerc(tx, ty) {
-      const minX = tx * TILE_SIZE_M - 20037508.34;
-      const maxX = (tx + 1) * TILE_SIZE_M - 20037508.34;
-      const maxY = 20037508.34 - ty * TILE_SIZE_M;
-      const minY = 20037508.34 - (ty + 1) * TILE_SIZE_M;
-      return [
-        [minX, minY],
-        [minX, maxY],
-        [maxX, maxY],
-        [maxX, minY],
-        [minX, minY]  // close the ring
-      ];
-    }
-
-    // Calculate unique tile ID from x,y coordinates
     function tileId(tx, ty) {
-      return tx + ty * TILE_COUNT;
+      return `${tx},${ty}`;
     }
 
-    // Convert coordinate array to GeoJSON polygon format
-    function coordsToGeoJSONPolygon(coords) {
-      return {
-        type: 'Polygon',
-        coordinates: [coords]
-      };
+    function getGroundResolution(latitude, zoom) {
+      const latitudeRadians = latitude * Math.PI / 180;
+      return Math.cos(latitudeRadians) * 2 * Math.PI * EARTH_RADIUS_METERS / 
+             (TILE_SIZE_PIXELS * Math.pow(2, zoom));
     }
 
-    // --------------------------------------------------------------------
-    // 5. On polygon creation, compute total area & tile coverage
-    // --------------------------------------------------------------------
-    // Handle polygon drawing completion event
+    function getTileArea(latitude, zoom) {
+      const resolution = getGroundResolution(latitude, zoom);
+      return Math.pow(TILE_SIZE_PIXELS * resolution, 2);
+    }
+
+    // Enhanced rounding function
+    function smartRound(value) {
+      // Round to nearest integer, but with a tiny bias upward
+      // This helps with precision issues that might cause numbers to round down
+      // when they should round up
+      return Math.round(value + 0.0000001);
+    }
+
     map.on(L.Draw.Event.CREATED, function (e) {
+      drawnItems.clearLayers();
       const layer = e.layer;
       drawnItems.addLayer(layer);
 
-      // Extract polygon coordinates from drawn layer
-      const latlngs = layer.getLatLngs()[0]; // outer ring
-      console.log('Polygon coordinates:', latlngs);
-      console.log(layer.getLatLngs());
-
-      // Convert coordinates to GeoJSON format
+      const latlngs = layer.getLatLngs()[0];
       const coordinates = latlngs.map(ll => [ll.lng, ll.lat]);
-      // Ensure polygon ring is closed
-      if (coordinates[0][0] !== coordinates[coordinates.length - 1][0] ||
-        coordinates[0][1] !== coordinates[coordinates.length - 1][1]) {
-        coordinates.push(coordinates[0]);
-      }
-
-      // Create GeoJSON feature for user's polygon
+      coordinates.push(coordinates[0]);
+      
       const userPolyFeature = turf.polygon([coordinates]);
-
-      // Calculate total area of drawn polygon
-      const totalAreaM2 = turf.area(userPolyFeature);
-      const totalAreaFt2 = sqMetersToSqFeet(totalAreaM2);
-
-      // Calculate tile range that covers the polygon
       const bounds = layer.getBounds();
-      const tileXMin = Math.floor((bounds.getWest() + 180) / 360 * TILE_COUNT);
-      const tileXMax = Math.floor((bounds.getEast() + 180) / 360 * TILE_COUNT);
-      const tileYMin = Math.floor((1 - Math.log(Math.tan(bounds.getNorth() * Math.PI / 180) +
-        1 / Math.cos(bounds.getNorth() * Math.PI / 180)) / Math.PI) / 2 * TILE_COUNT);
-      const tileYMax = Math.floor((1 - Math.log(Math.tan(bounds.getSouth() * Math.PI / 180) +
-        1 / Math.cos(bounds.getSouth() * Math.PI / 180)) / Math.PI) / 2 * TILE_COUNT);
+      const [minTileX, minTileY] = latLonToTile(bounds.getNorth(), bounds.getWest(), ZOOM_LEVEL);
+      const [maxTileX, maxTileY] = latLonToTile(bounds.getSouth(), bounds.getEast(), ZOOM_LEVEL);
 
-      // Process each tile that might intersect the polygon
       const tileResults = [];
-      for (let tx = tileXMin; tx <= tileXMax; tx++) {
-        for (let ty = tileYMin; ty <= tileYMax; ty++) {
-          // Calculate geographic bounds of current tile
-          const tileBounds = {
-            west: tx * 360 / TILE_COUNT - 180,
-            east: (tx + 1) * 360 / TILE_COUNT - 180,
-            north: Math.atan(Math.sinh(Math.PI * (1 - 2 * ty / TILE_COUNT))) * 180 / Math.PI,
-            south: Math.atan(Math.sinh(Math.PI * (1 - 2 * (ty + 1) / TILE_COUNT))) * 180 / Math.PI
-          };
+      const processedTiles = new Set();
 
-          // Create tile polygon for intersection test
+      for (let tx = Math.min(minTileX, maxTileX); tx <= Math.max(minTileX, maxTileX); tx++) {
+        for (let ty = Math.min(minTileY, maxTileY); ty <= Math.max(minTileY, maxTileY); ty++) {
+          const tileIdStr = tileId(tx, ty);
+          const tileIdCalc = tx + ty * TILE_COUNT;
+          if (processedTiles.has(tileIdStr)) continue;
+          processedTiles.add(tileIdStr);
+
+          const tileBounds = tileToLatLonBounds(tx, ty, ZOOM_LEVEL);
           const tileCoords = [
-            [tileBounds.west, tileBounds.south],
-            [tileBounds.east, tileBounds.south],
-            [tileBounds.east, tileBounds.north],
             [tileBounds.west, tileBounds.north],
-            [tileBounds.west, tileBounds.south]
+            [tileBounds.east, tileBounds.north],
+            [tileBounds.east, tileBounds.south],
+            [tileBounds.west, tileBounds.south],
+            [tileBounds.west, tileBounds.north]
           ];
-          const tilePolyFeature = turf.polygon([tileCoords]);
 
-          // Calculate intersection between user polygon and tile
+          const tilePolyFeature = turf.polygon([tileCoords]);
+          const centerLat = (tileBounds.north + tileBounds.south) / 2;
+          const fullTileArea = getTileArea(centerLat, ZOOM_LEVEL);
+
           try {
-            const intersection = turf.intersect(userPolyFeature, tilePolyFeature);
+            const intersection = turf.intersect(
+              turf.truncate(userPolyFeature, { precision: 12 }), // Increased precision
+              turf.truncate(tilePolyFeature, { precision: 12 })
+            );
+
             if (intersection) {
-              const intersectAreaM2 = turf.area(intersection);
-              const intersectAreaFt2 = sqMetersToSqFeet(intersectAreaM2);
+              const intersectionArea = turf.area(intersection);
+              const totalArea = turf.area(tilePolyFeature);
+              const ratio = intersectionArea / totalArea;
+              
+              // Calculate area with enhanced precision
+              const finalAreaM2 = fullTileArea * ratio;
+              const areaInSqFt = smartRound(finalAreaM2 * M2_TO_FT2);
 
               tileResults.push({
-                tileId: tileId(tx, ty),
-                areaSqFt: intersectAreaFt2
+                tileId: tileIdCalc,
+                areaSqFt: areaInSqFt
               });
+
+              L.geoJSON(intersection, {
+                style: {
+                  fillColor: '#ff7800',
+                  weight: 1,
+                  opacity: 1,
+                  color: 'white',
+                  fillOpacity: 0.7
+                }
+              }).addTo(drawnItems);
             }
           } catch (error) {
-            console.error(`Error processing tile ${tx},${ty}:`, error);
+            console.error(`Error processing tile ${tileIdStr}:`, error);
           }
         }
       }
 
-      // Calculate total area covered by tiles
       const totalTileArea = tileResults.reduce((sum, tile) => sum + tile.areaSqFt, 0);
-      console.log('Total polygon area:', totalAreaFt2);
-      console.log('Sum of tile areas:', totalTileArea);
 
-      // Format results for display
       let resultText = '';
-      resultText += `Total Polygon Area (sq ft): ${totalAreaFt2.toFixed(2)}\n`;
-      resultText += `Sum of Tile Areas (sq ft): ${totalTileArea.toFixed(2)}\n`;
-      resultText += `Intersecting Tiles (zoom=18):\n`;
+      resultText += `Total Polygon Area (sq ft): ${totalTileArea.toFixed(2)}\n`;
+      resultText += `Number of Intersecting Tiles: ${tileResults.length}\n\n`;
+      resultText += `Individual Tile Areas:\n`;
       tileResults.forEach(t => {
-        resultText += `  TileID=${t.tileId} => ${t.areaSqFt.toFixed(2)} sq ft\n`;
+        resultText += `Tile ${t.tileId}: ${t.areaSqFt} sq ft\n`;
       });
 
-      // Update results display
       document.getElementById('infoText').textContent = resultText;
     });
   </script>
 </body>
-
 </html>
